@@ -1,0 +1,72 @@
+name: Build and Publish OTA Firmware
+
+# Builds the firmware on every push to main and publishes it for devices to
+# self-update over WiFi - see checkForOtaUpdate()/reportFirmwareVersion() in
+# src/main.cpp and get_latest_firmware/report_firmware_version in Supabase.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'platformio.ini'
+      - '.github/workflows/ota.yml'
+  workflow_dispatch: {}
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: https://pbnisugqyvvltseahqyi.supabase.co
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install -U platformio
+
+      # Build number is unique and monotonically increasing per push, which is
+      # exactly what devices need to reliably tell "is this newer than mine".
+      - name: Compute version
+        id: version
+        run: echo "version=1.0.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build firmware
+        env:
+          PLATFORMIO_BUILD_FLAGS: -D FIRMWARE_VERSION=\"${{ steps.version.outputs.version }}\"
+        run: pio run
+
+      - name: Upload firmware to Supabase Storage
+        env:
+          SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          curl -sf -X POST "$SUPABASE_URL/storage/v1/object/firmware/$VERSION.bin" \
+            -H "apikey: $SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @.pio/build/esp32dev/firmware.bin
+
+      # service_role bypasses RLS, so this reaches every machine's row directly -
+      # no per-device RPC needed for the publish side, only for the device's own read/report.
+      - name: Publish new version to all machines
+        env:
+          SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          curl -sf -X PATCH "$SUPABASE_URL/rest/v1/machine_firmware" \
+            -H "apikey: $SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d "{\"latest_version\":\"$VERSION\",\"update_status\":\"Pending\"}"
