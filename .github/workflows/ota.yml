@@ -67,12 +67,16 @@ jobs:
 
       # service_role bypasses RLS, so this reaches every machine's row directly -
       # no per-device RPC needed for the publish side, only for the device's own read/report.
+      # PostgREST rejects an unfiltered PATCH outright ("UPDATE requires a WHERE
+      # clause", code 21000) as a safety net against exactly this kind of
+      # accidental-mass-update mistake - machine_id=not.is.null is how you
+      # spell "yes, every row, on purpose" against a not-null primary key.
       - name: Publish new version to all machines
         env:
           SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          resp=$(curl -s -w "\n%{http_code}" -X PATCH "$SUPABASE_URL/rest/v1/machine_firmware" \
+          resp=$(curl -s -w "\n%{http_code}" -X PATCH "$SUPABASE_URL/rest/v1/machine_firmware?machine_id=not.is.null" \
             -H "apikey: $SERVICE_ROLE_KEY" \
             -H "Authorization: Bearer $SERVICE_ROLE_KEY" \
             -H "Content-Type: application/json" \
