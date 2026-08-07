@@ -6,9 +6,27 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
+#include <esp_ota_ops.h>
 #include <math.h>
 #include <string.h>
 #include <time.h>
+
+// ── OTA rollback safety net ──────────────────────────────────────────────────
+// The bootloader is built with CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y, so a
+// freshly-OTA'd image boots in ESP_OTA_IMG_PENDING_VERIFY and the bootloader
+// will revert to the previous partition if the device reboots before that
+// image is confirmed good.
+//
+// The catch: Arduino's initArduino() runs BEFORE setup() and, by default,
+// confirms the image unconditionally the moment it sees PENDING_VERIFY. So
+// the safety net was compiled in but permanently disarmed - a CI build that
+// panicked at boot would have bricked every device that pulled it, with USB
+// reflash the only recovery.
+//
+// Overriding this weak hook (declared in the core's esp32-hal-misc.c) to
+// return true tells the core to skip that auto-confirm and leave the
+// decision to us - see confirmFirmwareIfHealthy() below.
+extern "C" bool verifyRollbackLater() { return true; }
 
 #include "Secrets.h"
 #include "DeviceConfig.h"
@@ -266,6 +284,47 @@ static void checkForOtaUpdate() {
     // HTTP_UPDATE_OK reboots immediately (rebootOnUpdate(true)) - no code after it runs.
 }
 
+// ── OTA image confirmation ───────────────────────────────────────────────────
+// Confirms the running image only once it has proven it can still be
+// REACHED - WiFi up and machine_id resolved against Supabase. That's the
+// criterion that actually matters: an image which can talk to the backend
+// can always be replaced by pushing another OTA, so it's recoverable. One
+// that can't is exactly what rollback exists to undo.
+//
+// Sensor health is deliberately NOT part of this. A dead I2C sensor is a
+// hardware fault that reverting firmware won't fix, and rolling back over it
+// would just churn versions while the real problem persists.
+//
+// Not confirming is safe and non-destructive: the image simply stays pending,
+// and this retries every loop. Rollback only happens if the device REBOOTS
+// while still unconfirmed - i.e. the crash-loop case this is meant to catch.
+static void confirmFirmwareIfHealthy() {
+    static bool settled = false;
+    if (settled) return;
+
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+    if (!running || esp_ota_get_state_partition(running, &state) != ESP_OK) {
+        settled = true;   // can't determine state (e.g. factory/USB-flashed) - nothing to confirm
+        return;
+    }
+    if (state != ESP_OTA_IMG_PENDING_VERIFY) {
+        settled = true;   // already valid, or not an OTA image at all
+        return;
+    }
+
+    // Health gate. Both must hold before we commit to this build.
+    if (WiFi.status() != WL_CONNECTED) return;
+    if (g_machineId[0] == '\0') return;
+
+    if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+        settled = true;
+        Serial.printf("[OTA] Image %s confirmed healthy — rollback cancelled.\n", FIRMWARE_VERSION);
+    } else {
+        Serial.println("[OTA] esp_ota_mark_app_valid_cancel_rollback() FAILED — image stays pending.");
+    }
+}
+
 // ── Cloud-triggered FRC calibration ─────────────────────────────────────────────
 // Polls machine_commands for this machine's oldest Pending frc_calibration
 // row. payload is {"target": <ppm of the known fresh air the sensor is in>}.
@@ -427,6 +486,19 @@ void setup() {
 
     initChipId();
     Serial.printf("Chip ID: %s (must have a matching chip_id set on its row in the machines table)\n", g_chipId);
+    Serial.printf("Firmware: %s\n", FIRMWARE_VERSION);
+
+    // Announce whether this boot is a freshly-OTA'd image still on probation.
+    // If it is and the device reboots before confirmFirmwareIfHealthy()
+    // succeeds, the bootloader reverts to the previous version.
+    {
+        const esp_partition_t* running = esp_ota_get_running_partition();
+        esp_ota_img_states_t state;
+        if (running && esp_ota_get_state_partition(running, &state) == ESP_OK &&
+            state == ESP_OTA_IMG_PENDING_VERIFY) {
+            Serial.println("[OTA] Running a PENDING_VERIFY image — will confirm once WiFi + machine_id are up.");
+        }
+    }
 
     loadWifiCreds();  // NVS-stored remote config if one was ever applied, else the fallback default
     Serial.printf("Connecting to \"%s\"", g_wifiSsid);
@@ -597,6 +669,11 @@ void loop() {
         lastCalPoll = millis();
         checkCalibrationRequest();
     }
+
+    // Must run BEFORE checkForOtaUpdate(): confirming the current image is
+    // what makes the previous partition free to be overwritten by the next
+    // update, and we never want to stack a new OTA on top of an unverified one.
+    confirmFirmwareIfHealthy();
 
     static unsigned long lastOtaCheck = 0;
     if (lastOtaCheck == 0 || millis() - lastOtaCheck >= OTA_CHECK_INTERVAL_MS) {
