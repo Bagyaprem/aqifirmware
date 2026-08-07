@@ -22,7 +22,7 @@
 // WIFI_SSID/WIFI_PASS above - e.g. after re-provisioning the router. Once
 // applied, remote config from the Supabase machine_wifi table can still take
 // over normally again; this only forces a one-time reset per unique tag.
-#define WIFI_FORCE_RESET_TAG "reset-1"
+#define WIFI_FORCE_RESET_TAG "reset-2"
 
 extern char g_machineId[40];   // UUID resolved from g_chipId; empty until resolveMachineId() succeeds
 extern char g_wifiSsid[33];
