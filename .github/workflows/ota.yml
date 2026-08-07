@@ -51,11 +51,19 @@ jobs:
           SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          curl -sf -X POST "$SUPABASE_URL/storage/v1/object/firmware/$VERSION.bin" \
+          resp=$(curl -s -w "\n%{http_code}" -X POST "$SUPABASE_URL/storage/v1/object/firmware/$VERSION.bin" \
             -H "apikey: $SERVICE_ROLE_KEY" \
             -H "Authorization: Bearer $SERVICE_ROLE_KEY" \
             -H "Content-Type: application/octet-stream" \
-            --data-binary @.pio/build/esp32dev/firmware.bin
+            --data-binary @.pio/build/esp32dev/firmware.bin)
+          status="${resp##*$'\n'}"
+          body="${resp%$'\n'*}"
+          echo "HTTP status: $status"
+          echo "Response body: $body"
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "::error::Firmware upload failed (HTTP $status)"
+            exit 1
+          fi
 
       # service_role bypasses RLS, so this reaches every machine's row directly -
       # no per-device RPC needed for the publish side, only for the device's own read/report.
@@ -64,9 +72,17 @@ jobs:
           SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          curl -sf -X PATCH "$SUPABASE_URL/rest/v1/machine_firmware" \
+          resp=$(curl -s -w "\n%{http_code}" -X PATCH "$SUPABASE_URL/rest/v1/machine_firmware" \
             -H "apikey: $SERVICE_ROLE_KEY" \
             -H "Authorization: Bearer $SERVICE_ROLE_KEY" \
             -H "Content-Type: application/json" \
             -H "Prefer: return=minimal" \
-            -d "{\"latest_version\":\"$VERSION\",\"update_status\":\"Pending\"}"
+            -d "{\"latest_version\":\"$VERSION\",\"update_status\":\"Pending\"}")
+          status="${resp##*$'\n'}"
+          body="${resp%$'\n'*}"
+          echo "HTTP status: $status"
+          echo "Response body: $body"
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "::error::Publish failed (HTTP $status)"
+            exit 1
+          fi
