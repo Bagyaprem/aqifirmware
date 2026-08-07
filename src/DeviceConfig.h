@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 // ── WiFi + machine (machine_id) allocation ──────────────────────────────────
-// Everything needed to figure out "who is this board" (resolve MACHINE_CODE
+// Everything needed to figure out "who is this board" (resolve its chip_id
 // to its machines.id UUID) and "how does it get online" (WiFi creds, with
 // remote-config support from the machine_wifi table) lives here.
 
@@ -24,21 +24,21 @@
 // over normally again; this only forces a one-time reset per unique tag.
 #define WIFI_FORCE_RESET_TAG "reset-1"
 
-// The machine_code of the row already created in the `machines` table
-// (id, customer_id, machine_name, machine_code, ...) for THIS physical unit.
-// There's no self-registration RPC in this schema - a matching row must
-// already exist - so firmware resolves this code to the machine's real UUID
-// (g_machineId) via the resolve_machine_id RPC at boot. Every other table
-// (sensor_data, machine_wifi, machine_commands, ...) is keyed off that UUID,
-// never off this code directly.
-//
-// PLACEHOLDER: "AQM-001" - insert a matching row in `machines` before
-// flashing, or change this to whatever machine_code was actually assigned.
-#define MACHINE_CODE "AQM-002"
-
-extern char g_machineId[40];   // UUID resolved from MACHINE_CODE; empty until resolveMachineId() succeeds
+extern char g_machineId[40];   // UUID resolved from g_chipId; empty until resolveMachineId() succeeds
 extern char g_wifiSsid[33];
 extern char g_wifiPass[65];
+
+// Stable per-board identity derived from the ESP32's own hardware MAC (see
+// initChipId() in DeviceConfig.cpp) - NOT a compile-time constant, so the
+// same compiled binary is correct on every physical board. This is what
+// resolveMachineId() sends to resolve_machine_id_by_chip(); the matching
+// `machines.chip_id` row must already exist (one-time provisioning: flash
+// once over USB, read this value off Serial Monitor, set it in Supabase).
+extern char g_chipId[13];
+
+// Populates g_chipId from WiFi.macAddress(). Requires WiFi.mode() to have
+// already been called (doesn't require an actual connection).
+void initChipId();
 
 // Loads whatever WiFi config is saved in NVS (or the hardcoded default if
 // none has ever been applied) into g_wifiSsid/g_wifiPass.
@@ -47,7 +47,7 @@ void loadWifiCreds();
 // Blocking connect attempt with LED heartbeat; returns true on success.
 bool connectWifi(const char* ssid, const char* pass, uint32_t timeoutMs);
 
-// Resolves MACHINE_CODE to its machines.id UUID via the resolve_machine_id
+// Resolves g_chipId to its machines.id UUID via the resolve_machine_id_by_chip
 // RPC and stores it in g_machineId. Requires WiFi to already be connected.
 // Returns true on success; safe to call again later if it failed before.
 bool resolveMachineId();

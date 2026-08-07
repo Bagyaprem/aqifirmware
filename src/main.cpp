@@ -405,8 +405,12 @@ void setup() {
     digitalWrite(LED_PIN, LOW);
 
     WiFi.mode(WIFI_STA);   // connectWifi() below handles disconnect+begin itself
+    WiFi.setSleep(false);  // modem-sleep power saving is what causes the ESP32 to silently
+                            // drop off WiFi after long uptimes on some routers; disabling it
+                            // trades a bit of power draw for actually staying connected
 
-    Serial.printf("Machine code: %s (must already exist in the machines table)\n", MACHINE_CODE);
+    initChipId();
+    Serial.printf("Chip ID: %s (must have a matching chip_id set on its row in the machines table)\n", g_chipId);
 
     loadWifiCreds();  // NVS-stored remote config if one was ever applied, else the fallback default
     Serial.printf("Connecting to \"%s\"", g_wifiSsid);
@@ -447,7 +451,9 @@ void setup() {
         Serial.printf("\nWiFi FAILED (status=%d)\n", WiFi.status());
     }
 
-    // Standard ESP32 I2C pinout: SDA=21, SCL=22.
+    // Standard ESP32 I2C pinout: SDA=21, SCL=22. Both boards are wired to
+    // this same pinout, which is required for one shared binary (chip-ID
+    // identity + no per-board pin override) to be OTA-safe for the fleet.
     Wire.begin(21, 22);
     Wire.setClock(I2C_CLOCK_HZ);
     Wire.setTimeOut(1000);   // caps any single I2C transaction at 1s instead of
@@ -490,6 +496,21 @@ void setup() {
 
 // ── Loop ──────────────────────────────────────────────────────────────────────
 void loop() {
+    // No reconnect logic existed before this - once WiFi dropped (router
+    // reboot, DHCP lease expiry, AP idle-kick), the device stayed offline
+    // silently until physically power-cycled. Retry on a cooldown so a
+    // transient drop self-heals instead of needing manual intervention.
+    static unsigned long lastWifiRetry = 0;
+    if (WiFi.status() != WL_CONNECTED && millis() - lastWifiRetry >= 30000) {
+        lastWifiRetry = millis();
+        Serial.println("[WIFI] Disconnected — attempting reconnect...");
+        if (connectWifi(g_wifiSsid, g_wifiPass, 15000)) {
+            Serial.printf("[WIFI] Reconnected — IP: %s\n", WiFi.localIP().toString().c_str());
+        } else {
+            Serial.println("[WIFI] Reconnect attempt failed — will retry in 30s.");
+        }
+    }
+
     float    pm[4] = {0, 0, 0, 0};
     uint16_t co2   = 0;
     float    temperature = 0, humidity = 0;

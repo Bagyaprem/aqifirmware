@@ -8,16 +8,33 @@
 #include <string.h>
 
 char g_machineId[40] = {0};
+char g_chipId[13]    = {0};
 char g_wifiSsid[33];
 char g_wifiPass[65];
 
 static Preferences wifiPrefs;
 static String      g_wifiApplied;
 
-// ── Machine identity (machine_code -> machines.id UUID) ─────────────────────
-// resolve_machine_id(code) is a Postgres function exposed over PostgREST as
-// a GET-able RPC; a scalar-returning RPC responds with the bare JSON value
-// (a quoted string here), not an object, so we just strip the quotes.
+// ── Chip identity ────────────────────────────────────────────────────────────
+// WiFi.macAddress() reads the base MAC burned into the ESP32's efuse at the
+// factory - unique per chip and immutable, so it works as a hardware serial
+// number without needing a compile-time constant that would differ per
+// board. Colons are stripped only for a cleaner/URL-safer string; nothing
+// about the value itself changes.
+void initChipId() {
+    String mac = WiFi.macAddress();   // e.g. "AA:BB:CC:DD:EE:FF"
+    int j = 0;
+    for (int i = 0; i < (int)mac.length() && j < 12; i++) {
+        if (mac.charAt(i) != ':') g_chipId[j++] = mac.charAt(i);
+    }
+    g_chipId[j] = '\0';
+}
+
+// ── Machine identity (chip_id -> machines.id UUID) ───────────────────────────
+// resolve_machine_id_by_chip(p_chip_id) is a Postgres function exposed over
+// PostgREST as a GET-able RPC; a scalar-returning RPC responds with the bare
+// JSON value (a quoted string here), not an object, so we just strip the
+// quotes.
 bool resolveMachineId() {
     if (WiFi.status() != WL_CONNECTED) return false;
 
@@ -25,15 +42,15 @@ bool resolveMachineId() {
     client.setInsecure();
     HTTPClient http;
     http.setTimeout(10000);
-    String url = String(SUPABASE_URL) + "/rest/v1/rpc/resolve_machine_id?code=" + MACHINE_CODE;
+    String url = String(SUPABASE_URL) + "/rest/v1/rpc/resolve_machine_id_by_chip?p_chip_id=" + g_chipId;
     http.begin(client, url);
     http.addHeader("apikey", SUPABASE_KEY);
     http.addHeader("Authorization", "Bearer " SUPABASE_KEY);
 
     int code = http.GET();
     if (code != 200) {
-        Serial.printf("[MACHINE] resolve_machine_id FAILED (HTTP %d) — is machine_code \"%s\" in the machines table?\n",
-            code, MACHINE_CODE);
+        Serial.printf("[MACHINE] resolve_machine_id_by_chip FAILED (HTTP %d) — is chip_id \"%s\" set on a row in the machines table?\n",
+            code, g_chipId);
         http.end();
         return false;
     }
@@ -42,13 +59,13 @@ bool resolveMachineId() {
 
     body.trim();
     if (body.length() < 2 || body == "null") {
-        Serial.printf("[MACHINE] resolve_machine_id returned no match for \"%s\"\n", MACHINE_CODE);
+        Serial.printf("[MACHINE] resolve_machine_id_by_chip returned no match for chip_id \"%s\"\n", g_chipId);
         return false;
     }
     if (body.charAt(0) == '"') body = body.substring(1, body.length() - 1);
 
     snprintf(g_machineId, sizeof(g_machineId), "%s", body.c_str());
-    Serial.printf("[MACHINE] Resolved \"%s\" -> %s\n", MACHINE_CODE, g_machineId);
+    Serial.printf("[MACHINE] Resolved chip_id \"%s\" -> %s\n", g_chipId, g_machineId);
     return true;
 }
 
