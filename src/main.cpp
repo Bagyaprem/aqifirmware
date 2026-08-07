@@ -515,13 +515,18 @@ void loop() {
     uint16_t co2   = 0;
     float    temperature = 0, humidity = 0;
 
-    if (!sps30ReadMedian(pm[0], pm[1], pm[2], pm[3])) {
-        Serial.println("[SPS30] Read failed/timed out - retrying in 3s");
-        delay(3000); return;
+    // A failed/dead PM sensor used to `return` here, which skipped everything
+    // below for the rest of loop() too - heartbeat, WiFi status, Supabase
+    // upload, calibration poll, and the OTA check. That made one broken
+    // sensor take the whole device off-grid (no heartbeat, never eligible
+    // for an OTA fix) instead of just reporting degraded PM readings.
+    bool pmOk = sps30ReadMedian(pm[0], pm[1], pm[2], pm[3]);
+    if (!pmOk) {
+        Serial.println("[SPS30] Read failed/timed out");
+    } else {
+        for (int c = 0; c < 4; c++)
+            ema[c] = (ema[c] < 0.f) ? pm[c] : EMA_ALPHA * pm[c] + (1.0f - EMA_ALPHA) * ema[c];
     }
-
-    for (int c = 0; c < 4; c++)
-        ema[c] = (ema[c] < 0.f) ? pm[c] : EMA_ALPHA * pm[c] + (1.0f - EMA_ALPHA) * ema[c];
 
     static unsigned long lastScdErrLog = 0;
     if (scd4xWaitReady()) {
@@ -538,7 +543,7 @@ void loop() {
         Serial.println("[SCD40] Not ready within timeout - check power/connector");
     }
 
-    for (int c = 0; c < 4; c++) g_pm[c] = (int)roundf(pm[c]);
+    if (pmOk) for (int c = 0; c < 4; c++) g_pm[c] = (int)roundf(pm[c]);
     g_co2   = co2;
     g_temp  = temperature;
     g_humid = humidity;
@@ -576,4 +581,8 @@ void loop() {
     }
 
     digitalWrite(LED_PIN, WiFi.status() == WL_CONNECTED ? HIGH : LOW);
+
+    // Same backoff as before on a dead/failed PM sensor - just moved to the
+    // end so it no longer skips heartbeat/upload/OTA on the way here.
+    if (!pmOk) delay(3000);
 }
