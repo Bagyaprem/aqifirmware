@@ -414,7 +414,7 @@ void setup() {
 
     loadWifiCreds();  // NVS-stored remote config if one was ever applied, else the fallback default
     Serial.printf("Connecting to \"%s\"", g_wifiSsid);
-    bool wifiOk = connectWifi(g_wifiSsid, g_wifiPass, 15000);
+    bool wifiOk = connectWifiAtBoot(15000);
 
     if (wifiOk) {
         digitalWrite(LED_PIN, HIGH);

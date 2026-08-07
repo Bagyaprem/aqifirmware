@@ -47,6 +47,14 @@ void loadWifiCreds();
 // Blocking connect attempt with LED heartbeat; returns true on success.
 bool connectWifi(const char* ssid, const char* pass, uint32_t timeoutMs);
 
+// Call this instead of connectWifi(g_wifiSsid, g_wifiPass, ...) at boot.
+// Handles a pending WIFI_FORCE_RESET_TAG change safely: tests the new
+// hardcoded default first, only commits to wiping the saved network if that
+// default actually connects, and otherwise falls back to the still-intact
+// saved config instead of stranding the device. See DeviceConfig.cpp for
+// the incident that made this necessary.
+bool connectWifiAtBoot(uint32_t timeoutMs);
+
 // Resolves g_chipId to its machines.id UUID via the resolve_machine_id_by_chip
 // RPC and stores it in g_machineId. Requires WiFi to already be connected.
 // Returns true on success; safe to call again later if it failed before.

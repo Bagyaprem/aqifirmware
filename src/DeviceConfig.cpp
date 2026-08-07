@@ -75,22 +75,17 @@ bool resolveMachineId() {
 // boot-once check below can tell "nothing new" from "there's a pending
 // change" without ever polling more than once per boot.
 
+static bool g_hadStoredWifiCreds = false;
+
 void loadWifiCreds() {
     wifiPrefs.begin("wifi", false);
-    String forceTag = wifiPrefs.getString("force_tag", "");
-    if (forceTag != WIFI_FORCE_RESET_TAG) {
-        wifiPrefs.remove("ssid");
-        wifiPrefs.remove("pass");
-        wifiPrefs.remove("applied");
-        wifiPrefs.putString("force_tag", WIFI_FORCE_RESET_TAG);
-        Serial.println("[WIFI] Forced reset tag changed — cleared saved WiFi config, using hardcoded default.");
-    }
     String storedSsid = wifiPrefs.getString("ssid", "");
     String storedPass = wifiPrefs.getString("pass", "");
     g_wifiApplied      = wifiPrefs.getString("applied", "");
     wifiPrefs.end();
 
-    if (storedSsid.length() > 0) {
+    g_hadStoredWifiCreds = storedSsid.length() > 0;
+    if (g_hadStoredWifiCreds) {
         snprintf(g_wifiSsid, sizeof(g_wifiSsid), "%s", storedSsid.c_str());
         snprintf(g_wifiPass, sizeof(g_wifiPass), "%s", storedPass.c_str());
     } else {
@@ -105,6 +100,55 @@ static void saveWifiCreds(const char* ssid, const char* pass, const char* applie
     wifiPrefs.putString("pass", pass);
     wifiPrefs.putString("applied", appliedAt);
     wifiPrefs.end();
+}
+
+// Boot-time connect with a SAFE forced-reset path. Previously, bumping
+// WIFI_FORCE_RESET_TAG wiped the saved network unconditionally, before ever
+// testing whether WIFI_SSID/WIFI_PASS is actually reachable from this
+// device's physical location - fine for the single-router-got-reprovisioned
+// case this was designed for, but on a multi-site fleet it permanently
+// stranded a device whose deployed location was never near that hardcoded
+// network at all (confirmed live 2026-08-07: force-reset fired, "Prem" was
+// unreachable, NVS was already wiped, and nothing else in this firmware ever
+// calls checkRemoteWifiConfig() unless the initial boot connection already
+// succeeded - the device had no path back online without a USB reflash).
+// Now the reset is provisional: the new default has to actually prove
+// reachable before we give up the working saved config, and if it doesn't,
+// we keep using what we had and just try again next boot.
+bool connectWifiAtBoot(uint32_t timeoutMs) {
+    wifiPrefs.begin("wifi", false);
+    String forceTag = wifiPrefs.getString("force_tag", "");
+    wifiPrefs.end();
+
+    bool resetPending = (forceTag != WIFI_FORCE_RESET_TAG);
+
+    if (resetPending && g_hadStoredWifiCreds) {
+        Serial.printf("\n[WIFI] Force-reset pending — testing default \"%s\" before giving up saved config...", WIFI_SSID);
+        if (connectWifi(WIFI_SSID, WIFI_PASS, timeoutMs)) {
+            wifiPrefs.begin("wifi", false);
+            wifiPrefs.remove("ssid");
+            wifiPrefs.remove("pass");
+            wifiPrefs.remove("applied");
+            wifiPrefs.putString("force_tag", WIFI_FORCE_RESET_TAG);
+            wifiPrefs.end();
+            snprintf(g_wifiSsid, sizeof(g_wifiSsid), "%s", WIFI_SSID);
+            snprintf(g_wifiPass, sizeof(g_wifiPass), "%s", WIFI_PASS);
+            g_wifiApplied = "";
+            Serial.println("\n[WIFI] Default reachable — force reset applied.");
+            return true;
+        }
+        Serial.println("\n[WIFI] Default unreachable — keeping existing saved config, will retry the reset next boot.");
+        // g_wifiSsid/g_wifiPass still hold the untouched saved credentials
+        // from loadWifiCreds() - fall through and try those instead.
+    } else if (resetPending) {
+        // Nothing saved to protect (brand-new board) - safe to just adopt
+        // the new tag now, no separate attempt needed.
+        wifiPrefs.begin("wifi", false);
+        wifiPrefs.putString("force_tag", WIFI_FORCE_RESET_TAG);
+        wifiPrefs.end();
+    }
+
+    return connectWifi(g_wifiSsid, g_wifiPass, timeoutMs);
 }
 
 bool connectWifi(const char* ssid, const char* pass, uint32_t timeoutMs) {
