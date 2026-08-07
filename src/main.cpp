@@ -112,6 +112,22 @@ static void pushToSupabase() {
     http.end();
 }
 
+// millis() is a uint32_t of milliseconds, so it silently wraps back to 0
+// after ~49.7 days of continuous uptime. The scheduling comparisons in
+// loop() are all of the form (millis() - last >= interval), which stays
+// correct across a wrap thanks to unsigned arithmetic - but reporting
+// millis()/1000 as an absolute uptime does NOT: it would drop from ~4.3M
+// seconds straight back to 0, indistinguishable from a device that just
+// rebooted. Counting the wraps keeps the reported total honest.
+static uint64_t uptimeSeconds() {
+    static uint32_t lastMillis = 0;
+    static uint32_t wraps      = 0;
+    uint32_t now = millis();
+    if (now < lastMillis) wraps++;   // only possible via a 32-bit overflow
+    lastMillis = now;
+    return ((uint64_t)wraps << 32 | now) / 1000ULL;
+}
+
 // ── Machine status heartbeat ─────────────────────────────────────────────────
 // Reports liveness to the website's "Quick Status" panel via a SECURITY
 // DEFINER RPC (anon has no direct write access to machine_status - see
@@ -134,8 +150,8 @@ static void reportMachineHeartbeat(const char* sensorStatus) {
 
     char json[192];
     snprintf(json, sizeof(json),
-        "{\"mid\":\"%s\",\"p_uptime_seconds\":%lu,\"p_sensor_status\":\"%s\"}",
-        g_machineId, millis() / 1000UL, sensorStatus);
+        "{\"mid\":\"%s\",\"p_uptime_seconds\":%llu,\"p_sensor_status\":\"%s\"}",
+        g_machineId, (unsigned long long)uptimeSeconds(), sensorStatus);
 
     int code = http.POST(json);
     if (code != 204 && code != 200) {
@@ -558,7 +574,15 @@ void loop() {
     static unsigned long lastStatusReport = 0;
     if (lastStatusReport == 0 || millis() - lastStatusReport >= STATUS_REPORT_INTERVAL_MS) {
         lastStatusReport = millis();
-        reportMachineHeartbeat(co2 > 0 ? "OK" : "Degraded");
+        // Reflects BOTH sensors. This used to be `co2 > 0 ? "OK" : "Degraded"`,
+        // which ignored the PM sensor entirely - so a dead/unplugged SPS30
+        // reported "OK" indefinitely while its PM readings sat frozen, with
+        // nothing on the dashboard hinting anything was wrong.
+        const char* sensorStatus;
+        if (co2 > 0 && pmOk)        sensorStatus = "OK";
+        else if (co2 > 0 || pmOk)   sensorStatus = "Degraded";   // exactly one sensor alive
+        else                        sensorStatus = "Error";      // neither responding
+        reportMachineHeartbeat(sensorStatus);
         reportWifiStatus();
     }
 

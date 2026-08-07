@@ -12,6 +12,18 @@ on:
       - '.github/workflows/ota.yml'
   workflow_dispatch: {}
 
+# Version is 1.0.<run_number>, which increases per run STARTED, not per run
+# finished. Without this, two overlapping runs (two quick pushes, or a manual
+# dispatch racing a push) race at the final "publish to all machines" PATCH,
+# and whichever lands LAST wins - so a slower older run finishing after a
+# newer one silently downgrades latest_version fleet-wide, and every device
+# then flashes backwards. Serialising the whole workflow removes the race;
+# cancel-in-progress is deliberately false so an already-uploaded build still
+# finishes recording itself rather than being abandoned half-published.
+concurrency:
+  group: ota-publish
+  cancel-in-progress: false
+
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
