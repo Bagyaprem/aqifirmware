@@ -55,6 +55,7 @@ jobs:
             -H "apikey: $SERVICE_ROLE_KEY" \
             -H "Authorization: Bearer $SERVICE_ROLE_KEY" \
             -H "Content-Type: application/octet-stream" \
+            -H "x-upsert: true" \
             --data-binary @.pio/build/esp32dev/firmware.bin)
           status="${resp##*$'\n'}"
           body="${resp%$'\n'*}"
