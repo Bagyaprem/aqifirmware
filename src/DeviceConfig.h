@@ -65,3 +65,15 @@ bool resolveMachineId();
 // (persisting to NVS) only if it actually connects. Requires g_machineId to
 // already be resolved. See DeviceConfig.cpp for the full rationale.
 void checkRemoteWifiConfig();
+
+// Persists a WiFi config to NVS so it survives power loss. `appliedAt` is the
+// machine_wifi.updated_at the config came from, or "" when it came from the
+// on-device setup portal (which has no dashboard row behind it).
+void saveWifiCreds(const char* ssid, const char* pass, const char* appliedAt);
+
+// Sets a one-shot NVS flag telling the NEXT boot to skip checkRemoteWifiConfig().
+// Needed after the setup portal provisions the device: machine_wifi still holds
+// the stale credentials that caused the outage, and applying them again would
+// waste a 15s failed connect on every boot until the dashboard catches up.
+// The regular reportWifiStatus() heartbeat re-syncs the dashboard within 30s.
+void markPortalProvisioned();

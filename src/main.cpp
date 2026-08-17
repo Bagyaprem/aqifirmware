@@ -30,6 +30,7 @@ extern "C" bool verifyRollbackLater() { return true; }
 
 #include "Secrets.h"
 #include "DeviceConfig.h"
+#include "WifiPortal.h"
 
 #ifdef NO_ERROR
 #undef NO_ERROR
@@ -588,8 +589,13 @@ void loop() {
     // reboot, DHCP lease expiry, AP idle-kick), the device stayed offline
     // silently until physically power-cycled. Retry on a cooldown so a
     // transient drop self-heals instead of needing manual intervention.
+    //
+    // Skipped while someone is actually connected to the setup portal:
+    // connectWifi() blocks for up to 15s, which would freeze the portal's web
+    // server mid-form for a customer who is typing into it.
     static unsigned long lastWifiRetry = 0;
-    if (WiFi.status() != WL_CONNECTED && millis() - lastWifiRetry >= 30000) {
+    if (WiFi.status() != WL_CONNECTED && millis() - lastWifiRetry >= 30000 &&
+        !portalHasClient()) {
         lastWifiRetry = millis();
         Serial.println("[WIFI] Disconnected — attempting reconnect...");
         if (connectWifi(g_wifiSsid, g_wifiPass, 15000)) {
@@ -597,6 +603,39 @@ void loop() {
         } else {
             Serial.println("[WIFI] Reconnect attempt failed — will retry in 30s.");
         }
+    }
+
+    // ── Offline recovery ─────────────────────────────────────────────────────
+    // The retry above can only ever try the credentials we already have, and
+    // new ones normally arrive FROM the dashboard - over the very network that
+    // just changed. A customer who swaps their router or password without
+    // updating the dashboard first was therefore unrecoverable without a USB
+    // reflash. Publishing our own AP after a sustained outage gives them a way
+    // in. It closes itself the moment the saved network works again, so a
+    // rebooting router never needs anyone's attention. See WifiPortal.h.
+    static unsigned long offlineSince = 0;
+    if (WiFi.status() == WL_CONNECTED) {
+        offlineSince = 0;
+        if (portalIsActive()) {
+            Serial.println("[PORTAL] Back online — closing the setup network.");
+            portalEnd();
+        }
+    } else if (offlineSince == 0) {
+        offlineSince = millis();
+    } else if (!portalIsActive() && millis() - offlineSince >= PORTAL_TRIGGER_MS) {
+        portalBegin();
+    }
+
+    if (portalIsActive()) {
+        // Sensor reads block for seconds at a time (sps30WaitReady /
+        // scd4xWaitReady), long enough that a phone's captive-portal browser
+        // gives up on the page. Nothing is buffered while offline, so pausing
+        // sampling until we're back online costs no data that would have
+        // survived anyway.
+        portalHandle();
+        portalLedTick();
+        delay(2);
+        return;
     }
 
     float    pm[4] = {0, 0, 0, 0};

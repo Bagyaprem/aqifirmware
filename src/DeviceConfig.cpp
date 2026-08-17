@@ -1,5 +1,6 @@
 #include "DeviceConfig.h"
 #include "Secrets.h"
+#include "WifiPortal.h"
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -94,11 +95,17 @@ void loadWifiCreds() {
     }
 }
 
-static void saveWifiCreds(const char* ssid, const char* pass, const char* appliedAt) {
+void saveWifiCreds(const char* ssid, const char* pass, const char* appliedAt) {
     wifiPrefs.begin("wifi", false);
     wifiPrefs.putString("ssid", ssid);
     wifiPrefs.putString("pass", pass);
     wifiPrefs.putString("applied", appliedAt);
+    wifiPrefs.end();
+}
+
+void markPortalProvisioned() {
+    wifiPrefs.begin("wifi", false);
+    wifiPrefs.putBool("portal_ok", true);
     wifiPrefs.end();
 }
 
@@ -152,7 +159,11 @@ bool connectWifiAtBoot(uint32_t timeoutMs) {
 }
 
 bool connectWifi(const char* ssid, const char* pass, uint32_t timeoutMs) {
-    WiFi.disconnect(true);
+    // disconnect(true) powers the radio down, which also takes the setup
+    // portal's access point with it - and this is called *from* the portal to
+    // test what the customer typed. Only tear the radio down when there's no
+    // AP to protect.
+    WiFi.disconnect(!portalIsActive());
     delay(100);
     WiFi.begin(ssid, pass);
     bool     ledState  = false;
@@ -178,6 +189,21 @@ bool connectWifi(const char* ssid, const char* pass, uint32_t timeoutMs) {
 void checkRemoteWifiConfig() {
     if (WiFi.status() != WL_CONNECTED) return;
     if (g_machineId[0] == '\0') return; // no resolved machine_id to look up yet
+
+    // If the setup portal provisioned this device, machine_wifi is by
+    // definition still holding the credentials that stopped working - that's
+    // what forced someone to walk up to the unit. Applying them here would
+    // burn a guaranteed-to-fail 15s connect attempt on every boot until the
+    // dashboard catches up, so skip exactly once. reportWifiStatus() pushes
+    // the real credentials up within 30s, after which this resumes normally.
+    wifiPrefs.begin("wifi", false);
+    bool justProvisioned = wifiPrefs.getBool("portal_ok", false);
+    if (justProvisioned) wifiPrefs.remove("portal_ok");
+    wifiPrefs.end();
+    if (justProvisioned) {
+        Serial.println("[WIFI] Credentials came from the setup portal — skipping remote config once.");
+        return;
+    }
 
     WiFiClientSecure client;
     client.setInsecure();
