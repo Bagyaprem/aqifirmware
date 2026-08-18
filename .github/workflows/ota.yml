@@ -49,9 +49,18 @@ jobs:
 
       # Build number is unique and monotonically increasing per push, which is
       # exactly what devices need to reliably tell "is this newer than mine".
+      #
+      # Major bumped to 2 on 2026-08-18. A "2.0" build carrying the on-device
+      # WiFi setup portal was published to the fleet by hand (built locally,
+      # uploaded to Storage, machine_firmware PATCHed directly) rather than
+      # through this workflow. Left at 1.0.x, the very next run here would have
+      # published 1.0.10 - a *different* string from "2.0", which is the only
+      # comparison checkForOtaUpdate() makes - and every device would have
+      # "updated" straight back off the portal build. Keeping the major at 2
+      # means CI resumes above what was published by hand instead of fighting it.
       - name: Compute version
         id: version
-        run: echo "version=1.0.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+        run: echo "version=2.0.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
 
       - name: Build firmware
         env:
