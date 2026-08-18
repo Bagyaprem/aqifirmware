@@ -14,8 +14,17 @@
 // Settings page). Once a remote config is applied via machine_wifi, THAT is
 // what persists across reboots from then on - see
 // loadWifiCreds()/checkRemoteWifiConfig() in DeviceConfig.cpp.
-#define WIFI_SSID "Prem"
-#define WIFI_PASS "987654321"
+// These are deliberately a network that does not exist. A brand-new board
+// therefore fails its boot connection, and after PORTAL_TRIGGER_MS raises its
+// own setup AP - which is exactly the intended out-of-box provisioning path,
+// and needs no per-customer firmware build.
+//
+// Until 2026-08-18 these were a real personal network ("Prem" / a real
+// password), compiled into every unit and shipped inside a binary that sat in
+// a PUBLIC storage bucket - i.e. published to anyone who knew the URL. Never
+// put a working credential here.
+#define WIFI_SSID "ZYGREEN-UNPROVISIONED"
+#define WIFI_PASS "unprovisioned"
 
 // Bump this string any time you need this firmware to forcibly wipe
 // whatever WiFi config is currently saved in NVS and go back to using

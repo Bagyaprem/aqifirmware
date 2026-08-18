@@ -155,6 +155,30 @@ static uint64_t uptimeSeconds() {
     return ((uint64_t)wraps << 32 | now) / 1000ULL;
 }
 
+// Building JSON with snprintf and a raw user-supplied string breaks the moment
+// that string contains a double quote or a backslash - both perfectly legal in
+// a WiFi name or password, and common in generated passwords. The result is
+// malformed JSON, a rejected RPC, and WiFi status that silently stops updating
+// with nothing anywhere explaining why. Escape properly instead.
+static void jsonEscape(const char* in, char* out, size_t outSize) {
+    size_t o = 0;
+    for (size_t i = 0; in[i] != '\0'; i++) {
+        char c = in[i];
+        if (c == '"' || c == '\\') {
+            if (o + 2 >= outSize) break;
+            out[o++] = '\\';
+            out[o++] = c;
+        } else if ((unsigned char)c < 0x20) {
+            if (o + 6 >= outSize) break;      // control chars must be \u00XX
+            o += snprintf(out + o, outSize - o, "\\u%04x", (unsigned)(unsigned char)c);
+        } else {
+            if (o + 1 >= outSize) break;
+            out[o++] = c;
+        }
+    }
+    out[o] = '\0';
+}
+
 // ── Machine status heartbeat ─────────────────────────────────────────────────
 // Reports liveness to the website's "Quick Status" panel via a SECURITY
 // DEFINER RPC (anon has no direct write access to machine_status - see
@@ -206,10 +230,16 @@ static void reportWifiStatus() {
     http.addHeader("Authorization", "Bearer " SUPABASE_KEY);
     http.addHeader("Prefer",        "return=minimal");
 
-    char json[320];
+    // Worst case every character needs escaping, so allow 2x the source buffers.
+    char ssidEsc[sizeof(g_wifiSsid) * 2];
+    char passEsc[sizeof(g_wifiPass) * 2];
+    jsonEscape(g_wifiSsid, ssidEsc, sizeof(ssidEsc));
+    jsonEscape(g_wifiPass, passEsc, sizeof(passEsc));
+
+    char json[520];
     snprintf(json, sizeof(json),
         "{\"mid\":\"%s\",\"p_ssid\":\"%s\",\"p_password\":\"%s\",\"p_ip\":\"%s\"}",
-        g_machineId, g_wifiSsid, g_wifiPass, WiFi.localIP().toString().c_str());
+        g_machineId, ssidEsc, passEsc, WiFi.localIP().toString().c_str());
 
     int code = http.POST(json);
     if (code != 204 && code != 200) {
@@ -279,12 +309,40 @@ static void checkForOtaUpdate() {
 
     Serial.printf("[OTA] New firmware available: %s (current: %s). Downloading...\n", body.c_str(), FIRMWARE_VERSION);
 
+    httpUpdate.rebootOnUpdate(true);
+
+    // Authenticated storage path FIRST (note: no "/public/"), so the firmware
+    // bucket can be switched to private. While the bucket was public, every
+    // build - and therefore the anon key, the AP setup password and the
+    // fallback WiFi credentials baked into it - could be downloaded by anyone
+    // who knew the URL. Reading it with the apikey header instead means an
+    // attacker needs the key to get a binary, and needs a binary to get the
+    // key, which breaks that bootstrap for anyone without physical access.
+    //
+    // The public path is kept as a fallback purely so this build works either
+    // way: it has to be delivered over the CURRENTLY public bucket, and must
+    // keep working if the private-bucket policy isn't in place yet. Once every
+    // device reports a version >= 2.4, the fallback can be deleted.
     WiFiClientSecure otaClient;
     otaClient.setInsecure();
-    String firmwareUrl = String(SUPABASE_URL) + "/storage/v1/object/public/firmware/" + body + ".bin";
 
-    httpUpdate.rebootOnUpdate(true);
-    t_httpUpdate_return ret = httpUpdate.update(otaClient, firmwareUrl);
+    HTTPClient otaHttp;
+    otaHttp.setTimeout(20000);
+    otaHttp.begin(otaClient, String(SUPABASE_URL) + "/storage/v1/object/firmware/" + body + ".bin");
+    otaHttp.addHeader("apikey",        SUPABASE_KEY);
+    otaHttp.addHeader("Authorization", "Bearer " SUPABASE_KEY);
+    t_httpUpdate_return ret = httpUpdate.update(otaHttp, FIRMWARE_VERSION);
+
+    if (ret == HTTP_UPDATE_FAILED) {
+        Serial.printf("[OTA] Authenticated fetch failed (%d): %s — trying the public path.\n",
+            httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+
+        WiFiClientSecure pubClient;
+        pubClient.setInsecure();
+        String publicUrl = String(SUPABASE_URL) + "/storage/v1/object/public/firmware/" + body + ".bin";
+        ret = httpUpdate.update(pubClient, publicUrl);
+    }
+
     if (ret == HTTP_UPDATE_FAILED) {
         Serial.printf("[OTA] Update failed (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
     } else if (ret == HTTP_UPDATE_NO_UPDATES) {
@@ -378,23 +436,33 @@ static void checkCalibrationRequest() {
     Serial.printf("[CAL] FRC request %s received — target %u ppm. Running FRC...\n",
         commandId.c_str(), target);
 
-    scd4x.stopPeriodicMeasurement();
-    delay(500);
-    uint16_t raw = 0;
-    int16_t  e   = scd4x.performForcedRecalibration(target, raw);
-    int      correction = 0;
-    bool     ok = false;
-    if (e == NO_ERROR && raw != 0xFFFF) {
-        correction = (int)raw - 32768;   // datasheet: applied correction = word - 0x8000
-        ok = true;
-        Serial.printf("[CAL] FRC OK. Correction = %+d ppm (baseline was %s).\n",
-            correction, correction < 0 ? "HIGH" : "LOW");
+    int  correction = 0;
+    bool ok         = false;
+
+    // atoi() returns 0 for a missing, malformed or non-numeric payload, and an
+    // FRC against 0 ppm would write a wildly wrong baseline into the sensor's
+    // EEPROM - permanently, and not undoable from the cloud. Only accept a
+    // figure that could plausibly be real ambient air.
+    if (target < 300 || target > 2000) {
+        Serial.printf("[CAL] Refusing FRC: target %u ppm is outside the plausible ambient "
+                      "range (300-2000). Check the command payload.\n", target);
     } else {
-        Serial.printf("[CAL] FRC FAILED (err=%d raw=0x%04X) — air not stable/known.\n", e, raw);
+        scd4x.stopPeriodicMeasurement();
+        delay(500);
+        uint16_t raw = 0;
+        int16_t  e   = scd4x.performForcedRecalibration(target, raw);
+        if (e == NO_ERROR && raw != 0xFFFF) {
+            correction = (int)raw - 32768;   // datasheet: applied correction = word - 0x8000
+            ok = true;
+            Serial.printf("[CAL] FRC OK. Correction = %+d ppm (baseline was %s).\n",
+                correction, correction < 0 ? "HIGH" : "LOW");
+        } else {
+            Serial.printf("[CAL] FRC FAILED (err=%d raw=0x%04X) — air not stable/known.\n", e, raw);
+        }
+        scd4x.persistSettings();
+        delay(1000);
+        scd4x.startPeriodicMeasurement();
     }
-    scd4x.persistSettings();
-    delay(1000);
-    scd4x.startPeriodicMeasurement();
 
     // Report back: mark this command Done/Failed so it runs exactly once
     char patch[96];
