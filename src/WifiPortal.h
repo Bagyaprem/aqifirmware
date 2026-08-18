@@ -27,12 +27,16 @@
 #define PORTAL_TRIGGER_MS (3UL * 60UL * 1000UL)
 
 // How often, while the portal is open and nobody is using it, to take the AP
-// down and check whether the saved network has come back. Deliberately slow:
-// each attempt makes the setup network vanish for up to 12s, and a customer
-// hunting for it on a phone must not be made to chase a network that keeps
-// disappearing. The plain 30s station retry is suspended while the portal is
-// up precisely because it did exactly that.
-#define PORTAL_RETRY_INTERVAL_MS (5UL * 60UL * 1000UL)
+// down and check whether the saved network has come back. Each attempt makes
+// the setup network vanish for up to 12s, so this can't be aggressive - the
+// plain 30s station retry is suspended while the portal is up precisely
+// because it made the AP unfindable.
+//
+// Started at 5 minutes, which was too slow to live with: switch a router or
+// hotspot back on and the device ignores it for up to five minutes, looking
+// broken. 2 minutes keeps the AP present ~90% of the time while making
+// recovery feel automatic.
+#define PORTAL_RETRY_INTERVAL_MS (2UL * 60UL * 1000UL)
 
 // WPA2 password for the setup network itself. Must be >= 8 characters. This
 // is printed on the device label and in the manual.
