@@ -220,8 +220,18 @@ void portalBegin() {
     Serial.printf("\n[PORTAL] Offline for %lus and \"%s\" is unreachable.\n",
         (unsigned long)(PORTAL_TRIGGER_MS / 1000), g_wifiSsid);
 
-    WiFi.mode(WIFI_AP_STA);
-    runScan();                       // before softAP() - no clients to disturb yet
+    // Scan first, while still a station - a scan needs the STA interface, and
+    // doing it now means the AP is never interrupted by one later.
+    WiFi.mode(WIFI_STA);
+    runScan();
+
+    // Then AP-ONLY, not AP_STA. Sharing the radio with a station that is
+    // scanning and retrying makes the soft AP intermittent and effectively
+    // unfindable - the AP has to follow the station's channel. Nothing needs
+    // the station while the portal is idle; the credential test in
+    // portalHandle() turns it back on for exactly as long as it needs it.
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_AP);
     WiFi.softAP(g_apSsid, AP_SETUP_PASSWORD);
     delay(200);                      // softAP needs a moment before softAPIP() is valid
 
@@ -267,6 +277,12 @@ void portalHandle() {
 
     if (g_state == P_CONNECTING) {
         Serial.printf("[PORTAL] Trying \"%s\" from the setup form...\n", g_pendSsid.c_str());
+
+        // The portal idles in AP-only mode, so bring the station up for the
+        // test and put it away again if it fails. The client is already
+        // holding a "connecting..." page that waits this out, so the AP
+        // wobbling for these few seconds costs nothing.
+        WiFi.mode(WIFI_AP_STA);
         if (connectWifi(g_pendSsid.c_str(), g_pendPass.c_str(), 12000)) {
             // appliedAt is deliberately empty: these credentials came from the
             // device, not from a machine_wifi row, so there is no updated_at to
@@ -283,6 +299,10 @@ void portalHandle() {
                 g_pendSsid.c_str());
         } else {
             g_state = P_FAILED;
+            // Back to AP-only so the setup network is solid again while they
+            // re-read the password and try a second time.
+            WiFi.disconnect(true);
+            WiFi.mode(WIFI_AP);
             Serial.printf("[PORTAL] Could not connect to \"%s\".\n", g_pendSsid.c_str());
         }
     }

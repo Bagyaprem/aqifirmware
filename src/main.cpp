@@ -590,12 +590,18 @@ void loop() {
     // silently until physically power-cycled. Retry on a cooldown so a
     // transient drop self-heals instead of needing manual intervention.
     //
-    // Skipped while someone is actually connected to the setup portal:
-    // connectWifi() blocks for up to 15s, which would freeze the portal's web
-    // server mid-form for a customer who is typing into it.
+    // Suspended entirely while the setup portal is open. This guard used to be
+    // !portalHasClient() - "don't interrupt someone mid-form" - which was a
+    // deadlock: nobody can connect to the AP until they can SEE it, so the
+    // guard never fired, and this ran every 30s while the portal was up.
+    // connectWifi() disconnects the radio and blocks for 15s, so the soft AP
+    // was being torn down and channel-hopped for 15 out of every 30 seconds.
+    // Confirmed live on 2026-08-18: a genuinely stranded board never showed a
+    // usable "ZyGreen-XXXXXX" network for 20+ minutes. Retrying the saved
+    // network is now the portal's own job, on its own schedule - see below.
     static unsigned long lastWifiRetry = 0;
     if (WiFi.status() != WL_CONNECTED && millis() - lastWifiRetry >= 30000 &&
-        !portalHasClient()) {
+        !portalIsActive()) {
         lastWifiRetry = millis();
         Serial.println("[WIFI] Disconnected — attempting reconnect...");
         if (connectWifi(g_wifiSsid, g_wifiPass, 15000)) {
@@ -627,14 +633,37 @@ void loop() {
     }
 
     if (portalIsActive()) {
+        // Because the 30s retry above is suspended, the portal owns the job of
+        // noticing that the saved network came back. It can't just call
+        // connectWifi() with the AP still up - that's the bug above - so it
+        // takes the AP down, tries once, and puts it back only if that failed.
+        // Skipped while a client is associated: someone is mid-form and pulling
+        // the network out from under them is worse than a slower recovery.
+        static unsigned long lastPortalRetry = 0;
+        if (!portalHasClient() && millis() - lastPortalRetry >= PORTAL_RETRY_INTERVAL_MS) {
+            lastPortalRetry = millis();
+            Serial.println("[PORTAL] Pausing the setup network to retry the saved one...");
+            portalEnd();
+            if (connectWifi(g_wifiSsid, g_wifiPass, 12000)) {
+                Serial.printf("[PORTAL] Saved network is back — IP: %s\n",
+                    WiFi.localIP().toString().c_str());
+                offlineSince = 0;
+            } else {
+                Serial.println("[PORTAL] Still unreachable — reopening the setup network.");
+                portalBegin();
+            }
+        }
+
         // Sensor reads block for seconds at a time (sps30WaitReady /
         // scd4xWaitReady), long enough that a phone's captive-portal browser
         // gives up on the page. Nothing is buffered while offline, so pausing
         // sampling until we're back online costs no data that would have
         // survived anyway.
-        portalHandle();
-        portalLedTick();
-        delay(2);
+        if (portalIsActive()) {
+            portalHandle();
+            portalLedTick();
+            delay(2);
+        }
         return;
     }
 
