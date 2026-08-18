@@ -181,11 +181,16 @@ bool connectWifi(const char* ssid, const char* pass, uint32_t timeoutMs) {
     return WiFi.status() == WL_CONNECTED;
 }
 
-// Boot-once: does Supabase have a WiFi config for THIS machine that we
-// haven't already applied? If so, connect with it, and only keep it (save to
-// NVS) if that connection actually succeeds - a typo'd password from the
-// website can't strand the device offline forever, it just falls back to
-// whatever it was already using for the rest of this session.
+// Does Supabase have a WiFi config for THIS machine that we haven't already
+// applied? If so, connect with it, and only keep it (save to NVS) if that
+// connection actually succeeds - a typo'd password from the website can't
+// strand the device offline forever, it just falls back to whatever it was
+// already using.
+//
+// Called at boot and then polled from loop() every WIFI_CONFIG_POLL_MS. It
+// was boot-only until 2026-08-18: a customer could save a new network on the
+// dashboard and watch nothing happen, because the device would not look again
+// until it was physically restarted.
 void checkRemoteWifiConfig() {
     if (WiFi.status() != WL_CONNECTED) return;
     if (g_machineId[0] == '\0') return; // no resolved machine_id to look up yet

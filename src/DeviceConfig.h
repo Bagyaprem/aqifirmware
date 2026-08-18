@@ -60,10 +60,15 @@ bool connectWifiAtBoot(uint32_t timeoutMs);
 // Returns true on success; safe to call again later if it failed before.
 bool resolveMachineId();
 
-// Boot-once: checks Supabase's machine_wifi table (filtered by g_machineId)
-// for a config newer than what we last applied, and switches to it
-// (persisting to NVS) only if it actually connects. Requires g_machineId to
-// already be resolved. See DeviceConfig.cpp for the full rationale.
+// Checks Supabase's machine_wifi table (filtered by g_machineId) for a config
+// newer than what we last applied, and switches to it (persisting to NVS) only
+// if it actually connects. Requires g_machineId to already be resolved.
+//
+// Called at boot AND polled every WIFI_CONFIG_POLL_MS from loop(). It was
+// boot-only until 2026-08-18, which meant a dashboard WiFi change did nothing
+// until someone physically power-cycled the unit. Cheap to call repeatedly:
+// it returns immediately unless updated_at differs from what we last applied.
+// See DeviceConfig.cpp for the full rationale.
 void checkRemoteWifiConfig();
 
 // Persists a WiFi config to NVS so it survives power loss. `appliedAt` is the

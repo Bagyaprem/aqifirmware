@@ -46,6 +46,14 @@ extern "C" bool verifyRollbackLater() { return true; }
 #define UPLOAD_INTERVAL_MS 5000   // sensors keep sampling into memory every loop; only upload this often
 #define STATUS_REPORT_INTERVAL_MS 30000
 
+// How often to re-check the dashboard for a WiFi config change. This used to
+// happen ONCE, in setup(), which meant a customer who changed the network on
+// the website saw nothing happen until somebody physically power-cycled the
+// unit - a site visit for anything wall-mounted. checkRemoteWifiConfig() is a
+// no-op unless machine_wifi.updated_at differs from what we last applied, so
+// polling costs one small request a minute and normally does nothing at all.
+#define WIFI_CONFIG_POLL_MS 60000
+
 // CI injects the real version via a -D FIRMWARE_VERSION build flag on every push to
 // main (see .github/workflows/ota.yml) - this exact string is what's compared against
 // machine_firmware.latest_version. The fallback below only applies to local manual
@@ -709,6 +717,17 @@ void loop() {
         millis() - lastResolveAttempt >= 30000) {
         lastResolveAttempt = millis();
         resolveMachineId();
+    }
+
+    // Apply a WiFi change made on the dashboard WITHOUT needing a power-cycle.
+    // Same safety as at boot: the new credentials are tried, and kept only if
+    // they actually connect - a typo on the website falls back to the network
+    // we're already on rather than stranding the unit.
+    static unsigned long lastWifiConfigPoll = 0;
+    if (WiFi.status() == WL_CONNECTED && g_machineId[0] != '\0' &&
+        millis() - lastWifiConfigPoll >= WIFI_CONFIG_POLL_MS) {
+        lastWifiConfigPoll = millis();
+        checkRemoteWifiConfig();
     }
 
     static unsigned long lastStatusReport = 0;
